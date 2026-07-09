@@ -19,7 +19,7 @@ import urllib.error
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
-VERSION = "1.0.0"
+VERSION = "1.0.2"
 
 class BybitAPI:
     """Pure Python Bybit API client without external dependencies"""
@@ -123,8 +123,8 @@ class BybitAPI:
             return result.get("result", {}).get("list", [])
         return []
     
-    def set_leverage(self, symbol: str, buy_leverage: str, sell_leverage: str, category: str = "linear") -> bool:
-        """Set leverage for a symbol"""
+    def set_leverage(self, symbol: str, buy_leverage: str, sell_leverage: str, category: str = "linear") -> tuple[bool, str]:
+        """Set leverage for a symbol - Returns (success, error_message)"""
         params = {
             "category": category,
             "symbol": symbol,
@@ -132,7 +132,12 @@ class BybitAPI:
             "sellLeverage": sell_leverage
         }
         result = self._request("POST", "/v5/position/set-leverage", params, signed=True)
-        return result.get("retCode") == 0
+        
+        if result.get("retCode") == 0:
+            return True, ""
+        else:
+            error_msg = result.get("retMsg", "Unknown error")
+            return False, error_msg
     
     def place_order(self, symbol: str, side: str, order_type: str, qty: str, 
                    price: str = None, stop_loss: str = None, take_profit: str = None,
@@ -489,10 +494,20 @@ class FVGTradingBot:
         print("=" * 80)
         mode = "DEMO" if self.demo_mode else "LIVE"
         print(f"Mode: {mode}")
+        
+        # Show balance warning for live mode
+        if not self.demo_mode:
+            balance = self.api.get_wallet_balance()
+            print(f"Wallet Balance: ${balance:.2f} USDT")
+            if balance < 10:
+                print("⚠ WARNING: Low balance! You need at least $10 USDT to trade.")
+                print("⚠ Deposit more or switch to demo mode in config.json")
+        
         print(f"Timeframe: {self.config.get('timeframe', '5')}")
         print(f"Scan Interval: {self.config.get('scan_interval_seconds', 60)}s")
         print(f"Max Open Positions: {self.config.get('max_open_positions', 3)}")
         print(f"Wallet Usage per Position: {self.config.get('wallet_percent_per_position', 80)}%")
+        print(f"Leverage: {self.config.get('leverage_percent', 30)}% of max")
         print("=" * 80)
         print()
     
@@ -633,7 +648,7 @@ class FVGTradingBot:
         else:
             balance = self.api.get_wallet_balance()
             if balance == 0:
-                self._log(f"✗ Failed to get wallet balance for {symbol}")
+                self._log(f"✗ Failed to get wallet balance or balance is zero")
                 return
         
         wallet_percent = self.config.get("wallet_percent_per_position", 80)
@@ -647,6 +662,14 @@ class FVGTradingBot:
         
         # Calculate quantity (position_value * leverage / price)
         quantity = (position_value * leverage) / current_price
+        
+        # Calculate margin needed (without leverage)
+        margin_needed = quantity * current_price / leverage
+        
+        # Check if we have enough balance
+        if margin_needed > balance:
+            self._log(f"✗ Insufficient balance for {symbol}: Need ${margin_needed:.2f}, Have ${balance:.2f}")
+            return
         
         # Get instrument constraints
         min_qty = 0.001
@@ -708,10 +731,30 @@ class FVGTradingBot:
                 self._log(f"✗ Insufficient demo balance for {symbol}")
         else:
             try:
+                # Check balance first
+                balance = self.api.get_wallet_balance()
+                if balance == 0:
+                    self._log(f"✗ No balance available. Current balance: $0")
+                    return
+                
+                position_value_needed = position.quantity * position.entry_price / leverage
+                if balance < position_value_needed:
+                    self._log(f"✗ Insufficient balance for {symbol}: Need ${position_value_needed:.2f}, Have ${balance:.2f}")
+                    return
+                
                 # Set leverage first
-                leverage_set = self.api.set_leverage(symbol, str(leverage), str(leverage))
-                if not leverage_set:
-                    self._log(f"⚠ Could not set leverage for {symbol}, using default")
+                leverage_ok, leverage_error = self.api.set_leverage(symbol, str(leverage), str(leverage))
+                if not leverage_ok:
+                    # Check if it's a critical error
+                    if "agreement" in leverage_error.lower():
+                        self._log(f"⚠ {symbol} requires trading agreement acceptance on Bybit website")
+                        self._log(f"  Skipping {symbol}...")
+                        return
+                    elif "leverage" in leverage_error.lower():
+                        self._log(f"⚠ Could not set leverage for {symbol}: {leverage_error}")
+                        self._log(f"  Attempting order with default leverage...")
+                    else:
+                        self._log(f"⚠ Leverage warning for {symbol}: {leverage_error}")
                 
                 # Place market order (without SL/TP initially)
                 order_id = self.api.place_order(
@@ -733,7 +776,7 @@ class FVGTradingBot:
                         take_profit=f"{tp_price:.8f}".rstrip('0').rstrip('.')
                     )
                 else:
-                    self._log(f"✗ Failed to open position for {symbol} (order rejected)")
+                    self._log(f"✗ Order rejected for {symbol} (check error above)")
             except Exception as e:
                 self._log(f"✗ Error opening position for {symbol}: {str(e)}")
     

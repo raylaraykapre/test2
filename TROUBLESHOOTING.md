@@ -104,6 +104,37 @@ python3 fvg_bot.py
 
 ### API Errors
 
+#### "Order failed: ab not enough for new order"
+- **Cause:** Insufficient balance in your account
+- **Fix:** 
+  1. Check balance: The bot now shows it on startup
+  2. Deposit more USDT to your Bybit account
+  3. Or reduce position size:
+     - Lower `wallet_percent_per_position` (try 30-50%)
+     - Lower `leverage_percent` (try 10%)
+     - Reduce `max_open_positions` to 1
+  4. Use `config.low-balance.json` as template:
+     ```bash
+     cp config.low-balance.json config.json
+     nano config.json  # Add your API keys
+     ```
+
+#### "Could not set leverage for [SYMBOL]"
+- **Cause:** API leverage setting failed (v1.0.2 handles this better)
+- **Fix:** 
+  - Update to v1.0.2+: `git pull origin main`
+  - Bot will now show the actual error and continue with default leverage
+  - If you see "agreement" in error, you need to accept trading terms on Bybit
+
+#### "You must sign the required agreement before trading this contract"
+- **Cause:** Some trading pairs require accepting Bybit's derivative terms
+- **Fix:**
+  1. Log in to Bybit website
+  2. Go to Derivatives/Perpetual trading
+  3. Try to manually trade the symbol that failed
+  4. Accept the terms when prompted
+  5. Run bot again - it will skip symbols you haven't accepted
+
 #### "HTTP Error: 401"
 - **Cause:** Invalid API key or secret
 - **Fix:** Double-check your API credentials in config.json

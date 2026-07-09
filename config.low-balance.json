@@ -1,0 +1,26 @@
+{
+    "_comment": "Configuration for accounts with low balance ($10-$100 USDT)",
+    "api_key": "YOUR_API_KEY_HERE",
+    "api_secret": "YOUR_API_SECRET_HERE",
+    "testnet": false,
+    "demo_mode": false,
+    "timeframe": "15",
+    "scan_interval_seconds": 120,
+    "wallet_percent_per_position": 50,
+    "max_open_positions": 1,
+    "leverage_percent": 10,
+    "take_profit_percent": 1.5,
+    "stop_loss_percent": 1.0,
+    "trailing_stop_percent": 0.3,
+    "trailing_tp_percent": 0.3,
+    "min_volume_usdt": 5000000,
+    "fvg_threshold_percent": 0.1,
+    "auto_threshold": false,
+    "excluded_symbols": [
+        "BTCDOMUSDT",
+        "DEFIUSDT",
+        "1000BONKUSDT",
+        "1000FLOKIUSDT",
+        "1000PEPEUSDT"
+    ]
+}

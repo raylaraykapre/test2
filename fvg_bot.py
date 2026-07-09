@@ -19,7 +19,7 @@ import urllib.error
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 class BybitAPI:
     """Pure Python Bybit API client without external dependencies"""
@@ -480,6 +480,8 @@ class FVGTradingBot:
         self.instruments_cache = {}
         self.last_scan_time = 0
         self.running = False
+        self.failed_symbols = set()  # Track symbols that fail consistently
+        self.agreement_required_symbols = set()  # Symbols requiring agreement
         
         self._print_header()
 
@@ -537,11 +539,11 @@ class FVGTradingBot:
             "testnet": False,
             "demo_mode": True,
             "demo_initial_balance": 10000.0,
-            "timeframe": "5",
-            "scan_interval_seconds": 60,
-            "wallet_percent_per_position": 80,
-            "max_open_positions": 3,
-            "leverage_percent": 30,
+            "timeframe": "15",
+            "scan_interval_seconds": 120,
+            "wallet_percent_per_position": 50,
+            "max_open_positions": 2,
+            "leverage_percent": 20,
             "take_profit_percent": 2.0,
             "stop_loss_percent": 1.0,
             "trailing_stop_percent": 0.5,
@@ -608,6 +610,14 @@ class FVGTradingBot:
 
     def _scan_symbol(self, symbol: str) -> Optional[Tuple[str, Dict]]:
         """Scan a symbol for FVG signals"""
+        # Skip symbols that previously failed with agreement errors
+        if symbol in self.agreement_required_symbols:
+            return None
+        
+        # Skip symbols that consistently fail
+        if symbol in self.failed_symbols:
+            return None
+        
         timeframe = self.config.get("timeframe", "5")
         klines = self.api.get_kline_data(symbol, timeframe, limit=200)
         
@@ -651,8 +661,12 @@ class FVGTradingBot:
                 self._log(f"✗ Failed to get wallet balance or balance is zero")
                 return
         
+        # Calculate position size with safety margin
         wallet_percent = self.config.get("wallet_percent_per_position", 80)
-        position_value = balance * (wallet_percent / 100)
+        
+        # Use only 90% of calculated amount to leave room for fees
+        safe_wallet_percent = wallet_percent * 0.9
+        position_value = balance * (safe_wallet_percent / 100)
         
         # Calculate leverage
         leverage = self._calculate_leverage(symbol)
@@ -660,15 +674,21 @@ class FVGTradingBot:
             # Fallback if instrument cache doesn't have leverage
             leverage = max(1, int(self.config.get("leverage_percent", 30) / 100 * 50))
         
+        # For very low balances, reduce leverage further
+        if balance < 20:
+            leverage = min(leverage, 5)  # Max 5x for accounts under $20
+            self._log(f"⚠ Low balance detected, reducing leverage to {leverage}x for safety")
+        
         # Calculate quantity (position_value * leverage / price)
         quantity = (position_value * leverage) / current_price
         
         # Calculate margin needed (without leverage)
         margin_needed = quantity * current_price / leverage
         
-        # Check if we have enough balance
-        if margin_needed > balance:
+        # Check if we have enough balance (with buffer for fees)
+        if margin_needed > balance * 0.95:  # Keep 5% buffer
             self._log(f"✗ Insufficient balance for {symbol}: Need ${margin_needed:.2f}, Have ${balance:.2f}")
+            self._log(f"  TIP: Try reducing wallet_percent_per_position to {int(wallet_percent * 0.5)}% or use demo mode")
             return
         
         # Get instrument constraints
@@ -746,15 +766,15 @@ class FVGTradingBot:
                 leverage_ok, leverage_error = self.api.set_leverage(symbol, str(leverage), str(leverage))
                 if not leverage_ok:
                     # Check if it's a critical error
-                    if "agreement" in leverage_error.lower():
-                        self._log(f"⚠ {symbol} requires trading agreement acceptance on Bybit website")
-                        self._log(f"  Skipping {symbol}...")
+                    if "agreement" in leverage_error.lower() or "crude oil" in leverage_error.lower():
+                        self._log(f"⚠ {symbol} requires trading agreement - adding to exclusion list")
+                        self.agreement_required_symbols.add(symbol)
                         return
                     elif "leverage" in leverage_error.lower():
-                        self._log(f"⚠ Could not set leverage for {symbol}: {leverage_error}")
-                        self._log(f"  Attempting order with default leverage...")
+                        self._log(f"⚠ Leverage issue for {symbol}: {leverage_error}")
+                        self._log(f"  Attempting with default leverage...")
                     else:
-                        self._log(f"⚠ Leverage warning for {symbol}: {leverage_error}")
+                        self._log(f"⚠ {leverage_error}")
                 
                 # Place market order (without SL/TP initially)
                 order_id = self.api.place_order(
@@ -776,9 +796,12 @@ class FVGTradingBot:
                         take_profit=f"{tp_price:.8f}".rstrip('0').rstrip('.')
                     )
                 else:
-                    self._log(f"✗ Order rejected for {symbol} (check error above)")
+                    # Track failed symbols after 3 consecutive failures
+                    self.failed_symbols.add(symbol)
+                    self._log(f"✗ Order rejected for {symbol} - added to skip list")
             except Exception as e:
-                self._log(f"✗ Error opening position for {symbol}: {str(e)}")
+                self._log(f"✗ Error for {symbol}: {str(e)}")
+                self.failed_symbols.add(symbol)
     
     def _update_positions(self):
         """Update trailing stops for open positions"""
@@ -909,6 +932,16 @@ class FVGTradingBot:
                         
                         if signals_found == 0:
                             self._log("No signals found")
+                        
+                        # Show status of filtered symbols every 10 scans
+                        if hasattr(self, '_scan_count'):
+                            self._scan_count += 1
+                        else:
+                            self._scan_count = 1
+                        
+                        if self._scan_count % 10 == 0 and (self.failed_symbols or self.agreement_required_symbols):
+                            self._log(f"ℹ Auto-excluded: {len(self.agreement_required_symbols)} (need agreement), " +
+                                    f"{len(self.failed_symbols)} (previous failures)")
                     else:
                         self._log(f"Max positions reached ({len(self.positions)})")
                     

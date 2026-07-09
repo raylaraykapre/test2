@@ -29,12 +29,14 @@ class BybitAPI:
         self.api_secret = api_secret
         self.base_url = "https://api-testnet.bybit.com" if testnet else "https://api.bybit.com"
         
-    def _generate_signature(self, params: Dict) -> str:
-        """Generate HMAC SHA256 signature"""
-        param_str = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    def _generate_signature(self, timestamp: str, params_str: str) -> str:
+        """Generate HMAC SHA256 signature for Bybit API v5"""
+        # V5 signature: timestamp + api_key + recv_window + params_str
+        recv_window = "5000"
+        sign_str = timestamp + self.api_key + recv_window + params_str
         return hmac.new(
             self.api_secret.encode('utf-8'),
-            param_str.encode('utf-8'),
+            sign_str.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
     
@@ -45,28 +47,37 @@ class BybitAPI:
             
         url = f"{self.base_url}{endpoint}"
         
-        if signed:
-            params['api_key'] = self.api_key
-            params['timestamp'] = str(int(time.time() * 1000))
-            params['sign'] = self._generate_signature(params)
-
-
+        # Prepare request
         if method == "GET":
             if params:
-                url += "?" + urllib.parse.urlencode(params)
+                query_string = urllib.parse.urlencode(sorted(params.items()))
+                url += "?" + query_string
             req = urllib.request.Request(url, method=method)
+            params_str = query_string if params else ""
         else:
-            data = json.dumps(params).encode('utf-8')
+            params_str = json.dumps(params) if params else ""
+            data = params_str.encode('utf-8')
             req = urllib.request.Request(url, data=data, method=method)
             req.add_header('Content-Type', 'application/json')
+        
+        # Add authentication headers for signed requests
+        if signed:
+            timestamp = str(int(time.time() * 1000))
+            signature = self._generate_signature(timestamp, params_str)
+            req.add_header('X-BAPI-API-KEY', self.api_key)
+            req.add_header('X-BAPI-TIMESTAMP', timestamp)
+            req.add_header('X-BAPI-SIGN', signature)
+            req.add_header('X-BAPI-RECV-WINDOW', '5000')
         
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 return json.loads(response.read().decode('utf-8'))
         except urllib.error.HTTPError as e:
             error_msg = e.read().decode('utf-8')
+            print(f"API Error: {error_msg}")  # Debug output
             return {"retCode": -1, "retMsg": f"HTTP Error: {error_msg}"}
         except Exception as e:
+            print(f"Request Error: {str(e)}")  # Debug output
             return {"retCode": -1, "retMsg": f"Request Error: {str(e)}"}
     
     def get_kline_data(self, symbol: str, interval: str, limit: int = 200) -> List[Dict]:
@@ -144,9 +155,14 @@ class BybitAPI:
             params["takeProfit"] = take_profit
             
         result = self._request("POST", "/v5/order/create", params, signed=True)
+        
+        # Better error handling
         if result.get("retCode") == 0:
             return result.get("result", {}).get("orderId")
-        return None
+        else:
+            error_msg = result.get("retMsg", "Unknown error")
+            print(f"Order failed: {error_msg}")
+            return None
 
 
     def set_trading_stop(self, symbol: str, stop_loss: str = None, take_profit: str = None,
@@ -616,20 +632,40 @@ class FVGTradingBot:
             balance = self.demo_mode.get_balance()
         else:
             balance = self.api.get_wallet_balance()
+            if balance == 0:
+                self._log(f"✗ Failed to get wallet balance for {symbol}")
+                return
         
         wallet_percent = self.config.get("wallet_percent_per_position", 80)
         position_value = balance * (wallet_percent / 100)
         
         # Calculate leverage
         leverage = self._calculate_leverage(symbol)
+        if leverage == 1 and symbol in self.instruments_cache:
+            # Fallback if instrument cache doesn't have leverage
+            leverage = max(1, int(self.config.get("leverage_percent", 30) / 100 * 50))
         
         # Calculate quantity (position_value * leverage / price)
         quantity = (position_value * leverage) / current_price
         
-        # Round to instrument's step
+        # Get instrument constraints
+        min_qty = 0.001
+        qty_step = 0.001
+        
         if symbol in self.instruments_cache:
+            min_qty = float(self.instruments_cache[symbol].get("minOrderQty", "0.001"))
             qty_step = float(self.instruments_cache[symbol].get("qtyStep", "0.001"))
+            
+            # Round to instrument's step
             quantity = round(quantity / qty_step) * qty_step
+            
+            # Check minimum
+            if quantity < min_qty:
+                self._log(f"✗ Quantity {quantity} below minimum {min_qty} for {symbol}")
+                return
+        
+        # Format quantity string (remove trailing zeros)
+        qty_str = f"{quantity:.8f}".rstrip('0').rstrip('.')
         
         # Calculate SL and TP based on ROI
         tp_percent = self.config.get("take_profit_percent", 2.0)
@@ -648,7 +684,6 @@ class FVGTradingBot:
             side = "Sell"
             tp_price = current_price * (1 - price_move_tp / 100)
             sl_price = current_price * (1 + price_move_sl / 100)
-
 
         # Create position object
         position = Position(
@@ -669,25 +704,38 @@ class FVGTradingBot:
             if success:
                 self.positions[symbol] = position
                 self._log(f"✓ DEMO OPENED: {position}")
-        else:
-            # Set leverage first
-            self.api.set_leverage(symbol, str(leverage), str(leverage))
-            
-            # Place order
-            order_id = self.api.place_order(
-                symbol=symbol,
-                side=side,
-                order_type="Market",
-                qty=str(quantity),
-                stop_loss=str(sl_price),
-                take_profit=str(tp_price)
-            )
-            
-            if order_id:
-                self.positions[symbol] = position
-                self._log(f"✓ LIVE OPENED: {position}")
             else:
-                self._log(f"✗ Failed to open position for {symbol}")
+                self._log(f"✗ Insufficient demo balance for {symbol}")
+        else:
+            try:
+                # Set leverage first
+                leverage_set = self.api.set_leverage(symbol, str(leverage), str(leverage))
+                if not leverage_set:
+                    self._log(f"⚠ Could not set leverage for {symbol}, using default")
+                
+                # Place market order (without SL/TP initially)
+                order_id = self.api.place_order(
+                    symbol=symbol,
+                    side=side,
+                    order_type="Market",
+                    qty=qty_str
+                )
+                
+                if order_id:
+                    self.positions[symbol] = position
+                    self._log(f"✓ LIVE OPENED: {position}")
+                    
+                    # Set TP/SL after order is filled (give it a moment)
+                    time.sleep(1)
+                    self.api.set_trading_stop(
+                        symbol=symbol,
+                        stop_loss=f"{sl_price:.8f}".rstrip('0').rstrip('.'),
+                        take_profit=f"{tp_price:.8f}".rstrip('0').rstrip('.')
+                    )
+                else:
+                    self._log(f"✗ Failed to open position for {symbol} (order rejected)")
+            except Exception as e:
+                self._log(f"✗ Error opening position for {symbol}: {str(e)}")
     
     def _update_positions(self):
         """Update trailing stops for open positions"""

@@ -33,12 +33,20 @@ python3 fvg_bot.py
 
 ### Termux (Android)
 ```bash
-pkg install python
-cd /path/to/bot
-python fvg_bot.py
+pkg install python git
+git clone https://github.com/raylaraykapre/test2.git
+cd test2
+python3 fvg_bot.py
 ```
 
 **No pip install required!** The bot uses only Python standard library.
+
+### Verify Setup
+```bash
+python3 diagnose.py
+```
+
+This will check your configuration and ensure everything is working correctly.
 
 ---
 
@@ -261,6 +269,14 @@ For issues, questions, or contributions, please contact the bot owners:
 ---
 
 ## Changelog
+
+### v1.0.1 (2024-07-10)
+- **FIXED:** Bybit API v5 authentication (positions now open correctly)
+- **IMPROVED:** Error handling with detailed error messages
+- **ADDED:** Diagnostic tool (`diagnose.py`) to test setup
+- **ADDED:** Comprehensive troubleshooting guide
+- **ENHANCED:** Quantity validation and formatting
+- **ENHANCED:** Better balance checking
 
 ### v1.0.0 (2024)
 - Initial release

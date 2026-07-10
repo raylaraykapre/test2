@@ -19,7 +19,7 @@ import urllib.error
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 class BybitAPI:
     """Pure Python Bybit API client without external dependencies"""
@@ -673,11 +673,6 @@ class FVGTradingBot:
         if leverage == 1 and symbol in self.instruments_cache:
             # Fallback if instrument cache doesn't have leverage
             leverage = max(1, int(self.config.get("leverage_percent", 30) / 100 * 50))
-        
-        # For very low balances, reduce leverage further
-        if balance < 20:
-            leverage = min(leverage, 5)  # Max 5x for accounts under $20
-            self._log(f"⚠ Low balance detected, reducing leverage to {leverage}x for safety")
         
         # Calculate quantity (position_value * leverage / price)
         quantity = (position_value * leverage) / current_price

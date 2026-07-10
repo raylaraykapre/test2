@@ -9,12 +9,8 @@ def calculate_position_size(balance, wallet_percent, leverage_percent, max_pair_
     safe_wallet_percent = wallet_percent * 0.9
     position_value = balance * (safe_wallet_percent / 100)
     
-    # Calculate leverage
+    # Calculate leverage (respects user config, no auto-reduction)
     actual_leverage = int(max_pair_leverage * (leverage_percent / 100))
-    
-    # Auto-reduce for low balances
-    if balance < 20:
-        actual_leverage = min(actual_leverage, 5)
     
     # Calculate quantities
     margin_needed = position_value

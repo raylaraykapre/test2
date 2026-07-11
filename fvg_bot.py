@@ -19,7 +19,7 @@ import urllib.error
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
-VERSION = "1.0.4"
+VERSION = "1.1.0"
 
 class BybitAPI:
     """Pure Python Bybit API client without external dependencies"""
@@ -510,6 +510,16 @@ class FVGTradingBot:
         print(f"Max Open Positions: {self.config.get('max_open_positions', 3)}")
         print(f"Wallet Usage per Position: {self.config.get('wallet_percent_per_position', 80)}%")
         print(f"Leverage: {self.config.get('leverage_percent', 30)}% of max")
+        
+        # Show scan mode
+        scan_mode = self.config.get('scan_mode', 'all')
+        if scan_mode == 'specific':
+            specific_pairs = self.config.get('specific_pairs', [])
+            print(f"Scan Mode: SPECIFIC PAIRS ONLY")
+            print(f"Trading Pairs: {', '.join(specific_pairs) if specific_pairs else 'None configured!'}")
+        else:
+            print(f"Scan Mode: ALL DERIVATIVES (volume filtered)")
+        
         print("=" * 80)
         print()
     
@@ -551,7 +561,9 @@ class FVGTradingBot:
             "min_volume_usdt": 1000000,
             "fvg_threshold_percent": 0.0,
             "auto_threshold": False,
-            "excluded_symbols": []
+            "excluded_symbols": [],
+            "scan_mode": "all",
+            "specific_pairs": []
         }
 
 
@@ -568,39 +580,75 @@ class FVGTradingBot:
         return min(calculated_leverage, max_lev)
     
     def _get_tradable_symbols(self) -> List[str]:
-        """Get list of tradable symbols with volume"""
-        self._log("Scanning for tradable perpetuals...")
+        """Get list of tradable symbols - either all or specific pairs"""
+        scan_mode = self.config.get("scan_mode", "all")
         
-        tickers = self.api.get_tickers(category="linear")
-        instruments = self.api.get_instruments_info(category="linear")
-        
-        # Build instruments cache
-        self.instruments_cache = {}
-        for inst in instruments:
-            symbol = inst.get("symbol", "")
-            self.instruments_cache[symbol] = {
-                "maxLeverage": inst.get("leverageFilter", {}).get("maxLeverage", "1"),
-                "minOrderQty": inst.get("lotSizeFilter", {}).get("minOrderQty", "0.001"),
-                "qtyStep": inst.get("lotSizeFilter", {}).get("qtyStep", "0.001")
-            }
-        
-        tradable = []
-        min_volume = self.config.get("min_volume_usdt", 1000000)
-        excluded = self.config.get("excluded_symbols", [])
-        
-        for ticker in tickers:
-            symbol = ticker.get("symbol", "")
-            volume = float(ticker.get("turnover24h", 0))
+        # Mode 1: Specific pairs only
+        if scan_mode == "specific":
+            specific_pairs = self.config.get("specific_pairs", [])
+            if not specific_pairs:
+                self._log("⚠ Specific pairs mode enabled but no pairs configured!")
+                return []
             
-            # Filter: must be USDT pair, have volume, not excluded
-            if (symbol.endswith("USDT") and 
-                volume >= min_volume and 
-                symbol not in excluded and
-                symbol in self.instruments_cache):
-                tradable.append(symbol)
+            self._log(f"Trading specific pairs: {', '.join(specific_pairs)}")
+            
+            # Still need to get instruments info for leverage/qty data
+            instruments = self.api.get_instruments_info(category="linear")
+            
+            # Build instruments cache for specified pairs
+            self.instruments_cache = {}
+            for inst in instruments:
+                symbol = inst.get("symbol", "")
+                if symbol in specific_pairs:
+                    self.instruments_cache[symbol] = {
+                        "maxLeverage": inst.get("leverageFilter", {}).get("maxLeverage", "1"),
+                        "minOrderQty": inst.get("lotSizeFilter", {}).get("minOrderQty", "0.001"),
+                        "qtyStep": inst.get("lotSizeFilter", {}).get("qtyStep", "0.001")
+                    }
+            
+            # Return only the pairs that exist on Bybit
+            valid_pairs = [p for p in specific_pairs if p in self.instruments_cache]
+            if len(valid_pairs) < len(specific_pairs):
+                invalid = set(specific_pairs) - set(valid_pairs)
+                self._log(f"⚠ Invalid pairs skipped: {', '.join(invalid)}")
+            
+            self._log(f"Trading {len(valid_pairs)} specific pairs")
+            return valid_pairs
         
-        self._log(f"Found {len(tradable)} tradable symbols")
-        return tradable
+        # Mode 2: Scan all derivatives (default)
+        else:
+            self._log("Scanning all perpetuals...")
+            
+            tickers = self.api.get_tickers(category="linear")
+            instruments = self.api.get_instruments_info(category="linear")
+            
+            # Build instruments cache
+            self.instruments_cache = {}
+            for inst in instruments:
+                symbol = inst.get("symbol", "")
+                self.instruments_cache[symbol] = {
+                    "maxLeverage": inst.get("leverageFilter", {}).get("maxLeverage", "1"),
+                    "minOrderQty": inst.get("lotSizeFilter", {}).get("minOrderQty", "0.001"),
+                    "qtyStep": inst.get("lotSizeFilter", {}).get("qtyStep", "0.001")
+                }
+            
+            tradable = []
+            min_volume = self.config.get("min_volume_usdt", 1000000)
+            excluded = self.config.get("excluded_symbols", [])
+            
+            for ticker in tickers:
+                symbol = ticker.get("symbol", "")
+                volume = float(ticker.get("turnover24h", 0))
+                
+                # Filter: must be USDT pair, have volume, not excluded
+                if (symbol.endswith("USDT") and 
+                    volume >= min_volume and 
+                    symbol not in excluded and
+                    symbol in self.instruments_cache):
+                    tradable.append(symbol)
+            
+            self._log(f"Found {len(tradable)} tradable symbols")
+            return tradable
     
     def _log(self, message: str):
         """Log with timestamp"""
